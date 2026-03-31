@@ -1,0 +1,22 @@
+Start testing: Mar 31 09:48 CST
+----------------------------------------------------------
+1/1 Testing: aes_ctr_test
+1/1 Test: aes_ctr_test
+Command: "/Users/alba/Desktop/aice_test/aes/build/aes_ctr_test"
+Directory: /Users/alba/Desktop/aice_test/aes/build
+"aes_ctr_test" start time: Mar 31 09:48 CST
+Output:
+----------------------------------------------------------
+[PASS] NIST AES-128-CTR encrypt
+[PASS] NIST AES-128-CTR decrypt
+[PASS] Partial-block round trip
+All AES-CTR tests passed.
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"aes_ctr_test" end time: Mar 31 09:48 CST
+"aes_ctr_test" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Mar 31 09:48 CST
