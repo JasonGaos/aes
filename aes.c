@@ -2,6 +2,53 @@
 
 #include <string.h>
 
+#if defined(__x86_64__) || defined(__x86_64) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#define AES_HAS_X86_BACKEND 1
+#endif
+
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+#define AES_HAS_ARM_BACKEND 1
+#endif
+
+#if defined(AES_HAS_X86_BACKEND)
+#include <wmmintrin.h>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <cpuid.h>
+#endif
+#endif
+
+#if defined(AES_HAS_ARM_BACKEND)
+#include <arm_neon.h>
+#if defined(__linux__)
+#include <sys/auxv.h>
+#if defined(__has_include)
+#if __has_include(<asm/hwcap.h>)
+#include <asm/hwcap.h>
+#endif
+#endif
+#ifndef HWCAP_AES
+#define HWCAP_AES (1UL << 3)
+#endif
+#endif
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+#endif
+
+#if defined(AES_HAS_X86_BACKEND) && (defined(__GNUC__) || defined(__clang__))
+#define AES_TARGET_AESNI __attribute__((target("aes")))
+#else
+#define AES_TARGET_AESNI
+#endif
+
+#if defined(AES_HAS_ARM_BACKEND) && (defined(__GNUC__) || defined(__clang__))
+#define AES_TARGET_ARM_CRYPTO __attribute__((target("+crypto")))
+#else
+#define AES_TARGET_ARM_CRYPTO
+#endif
+
 /*
  * AES-128 block core adapted from the portable single-block AES design in
  * https://github.com/mrdcvlsc/AES and wrapped here in a plain C CTR API.
@@ -107,6 +154,12 @@ static void add_round_key(uint8_t state[AES_BLOCK_SIZE], const uint8_t *round_ke
     }
 }
 
+typedef enum aes_backend {
+    AES_BACKEND_PORTABLE = 0,
+    AES_BACKEND_AESNI = 1,
+    AES_BACKEND_NEON = 2
+} aes_backend_t;
+
 static void key_expansion(const uint8_t *key, uint8_t round_keys[AES128_ROUND_KEY_SIZE]) {
     uint8_t temp[4];
     size_t bytes_generated = AES_KEY_SIZE;
@@ -139,9 +192,9 @@ static void key_expansion(const uint8_t *key, uint8_t round_keys[AES128_ROUND_KE
     secure_zero(temp, sizeof(temp));
 }
 
-static void aes_encrypt_block(const uint8_t round_keys[AES128_ROUND_KEY_SIZE],
-                              const uint8_t input[AES_BLOCK_SIZE],
-                              uint8_t output[AES_BLOCK_SIZE]) {
+static void aes_encrypt_block_portable(const uint8_t round_keys[AES128_ROUND_KEY_SIZE],
+                                       const uint8_t input[AES_BLOCK_SIZE],
+                                       uint8_t output[AES_BLOCK_SIZE]) {
     uint8_t state[AES_BLOCK_SIZE];
     size_t round;
 
@@ -164,6 +217,209 @@ static void aes_encrypt_block(const uint8_t round_keys[AES128_ROUND_KEY_SIZE],
     secure_zero(state, sizeof(state));
 }
 
+static int runtime_has_aesni(void) {
+#if defined(AES_HAS_X86_BACKEND)
+#if defined(_MSC_VER)
+    int info[4];
+    __cpuid(info, 1);
+    return (info[2] & (1 << 25)) != 0;
+#else
+    unsigned int eax;
+    unsigned int ebx;
+    unsigned int ecx;
+    unsigned int edx;
+
+    if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) == 0) {
+        return 0;
+    }
+
+    return (ecx & bit_AES) != 0u;
+#endif
+#else
+    return 0;
+#endif
+}
+
+static int runtime_has_arm_crypto(void) {
+#if defined(AES_HAS_ARM_BACKEND)
+#if defined(__APPLE__)
+    return 1;
+#elif defined(__linux__)
+    return (getauxval(AT_HWCAP) & HWCAP_AES) != 0u;
+#elif defined(_WIN32) && defined(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE)
+    return IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE) != 0;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+static aes_backend_t detect_backend(void) {
+    if (runtime_has_aesni()) {
+        return AES_BACKEND_AESNI;
+    }
+
+    if (runtime_has_arm_crypto()) {
+        return AES_BACKEND_NEON;
+    }
+
+    return AES_BACKEND_PORTABLE;
+}
+
+static aes_backend_t get_backend(void) {
+    static int initialized = 0;
+    static aes_backend_t backend = AES_BACKEND_PORTABLE;
+
+    if (!initialized) {
+        backend = detect_backend();
+        initialized = 1;
+    }
+
+    return backend;
+}
+
+#if defined(AES_HAS_X86_BACKEND)
+static __m128i aes128_assist(__m128i tmp1, __m128i tmp2) {
+    __m128i tmp3;
+    tmp2 = _mm_shuffle_epi32(tmp2, 0xff);
+    tmp3 = _mm_slli_si128(tmp1, 0x4);
+    tmp1 = _mm_xor_si128(tmp1, tmp3);
+    tmp3 = _mm_slli_si128(tmp3, 0x4);
+    tmp1 = _mm_xor_si128(tmp1, tmp3);
+    tmp3 = _mm_slli_si128(tmp3, 0x4);
+    tmp1 = _mm_xor_si128(tmp1, tmp3);
+    tmp1 = _mm_xor_si128(tmp1, tmp2);
+    return tmp1;
+}
+
+AES_TARGET_AESNI
+static void key_expansion_aesni(const uint8_t *key,
+                                uint8_t round_keys[AES128_ROUND_KEY_SIZE]) {
+    __m128i tmp1;
+    __m128i tmp2;
+    __m128i *schedule = (__m128i *)round_keys;
+
+    tmp1 = _mm_loadu_si128((const __m128i *)key);
+    schedule[0] = tmp1;
+
+    tmp2 = _mm_aeskeygenassist_si128(tmp1, 0x01);
+    tmp1 = aes128_assist(tmp1, tmp2);
+    schedule[1] = tmp1;
+
+    tmp2 = _mm_aeskeygenassist_si128(tmp1, 0x02);
+    tmp1 = aes128_assist(tmp1, tmp2);
+    schedule[2] = tmp1;
+
+    tmp2 = _mm_aeskeygenassist_si128(tmp1, 0x04);
+    tmp1 = aes128_assist(tmp1, tmp2);
+    schedule[3] = tmp1;
+
+    tmp2 = _mm_aeskeygenassist_si128(tmp1, 0x08);
+    tmp1 = aes128_assist(tmp1, tmp2);
+    schedule[4] = tmp1;
+
+    tmp2 = _mm_aeskeygenassist_si128(tmp1, 0x10);
+    tmp1 = aes128_assist(tmp1, tmp2);
+    schedule[5] = tmp1;
+
+    tmp2 = _mm_aeskeygenassist_si128(tmp1, 0x20);
+    tmp1 = aes128_assist(tmp1, tmp2);
+    schedule[6] = tmp1;
+
+    tmp2 = _mm_aeskeygenassist_si128(tmp1, 0x40);
+    tmp1 = aes128_assist(tmp1, tmp2);
+    schedule[7] = tmp1;
+
+    tmp2 = _mm_aeskeygenassist_si128(tmp1, 0x80);
+    tmp1 = aes128_assist(tmp1, tmp2);
+    schedule[8] = tmp1;
+
+    tmp2 = _mm_aeskeygenassist_si128(tmp1, 0x1b);
+    tmp1 = aes128_assist(tmp1, tmp2);
+    schedule[9] = tmp1;
+
+    tmp2 = _mm_aeskeygenassist_si128(tmp1, 0x36);
+    tmp1 = aes128_assist(tmp1, tmp2);
+    schedule[10] = tmp1;
+}
+
+AES_TARGET_AESNI
+static void aes_encrypt_block_aesni(const uint8_t round_keys[AES128_ROUND_KEY_SIZE],
+                                    const uint8_t input[AES_BLOCK_SIZE],
+                                    uint8_t output[AES_BLOCK_SIZE]) {
+    const __m128i *schedule = (const __m128i *)round_keys;
+    __m128i state = _mm_loadu_si128((const __m128i *)input);
+    size_t round;
+
+    state = _mm_xor_si128(state, schedule[0]);
+
+    for (round = 1u; round < AES128_ROUNDS; ++round) {
+        state = _mm_aesenc_si128(state, schedule[round]);
+    }
+
+    state = _mm_aesenclast_si128(state, schedule[AES128_ROUNDS]);
+    _mm_storeu_si128((__m128i *)output, state);
+}
+#endif
+
+#if defined(AES_HAS_ARM_BACKEND)
+AES_TARGET_ARM_CRYPTO
+static void aes_encrypt_block_neon(const uint8_t round_keys[AES128_ROUND_KEY_SIZE],
+                                   const uint8_t input[AES_BLOCK_SIZE],
+                                   uint8_t output[AES_BLOCK_SIZE]) {
+    uint8x16_t state = vld1q_u8(input);
+    size_t round;
+
+    state = vaesmcq_u8(vaeseq_u8(state, vld1q_u8(round_keys)));
+
+    for (round = 1u; round < AES128_ROUNDS - 1u; ++round) {
+        state = vaesmcq_u8(vaeseq_u8(state, vld1q_u8(round_keys + (round * AES_BLOCK_SIZE))));
+    }
+
+    state = vaeseq_u8(state, vld1q_u8(round_keys + ((AES128_ROUNDS - 1u) * AES_BLOCK_SIZE)));
+    state = veorq_u8(state, vld1q_u8(round_keys + (AES128_ROUNDS * AES_BLOCK_SIZE)));
+    vst1q_u8(output, state);
+}
+#endif
+
+static void init_round_keys(aes_backend_t backend,
+                            const uint8_t *key,
+                            uint8_t round_keys[AES128_ROUND_KEY_SIZE]) {
+#if defined(AES_HAS_X86_BACKEND)
+    if (backend == AES_BACKEND_AESNI) {
+        key_expansion_aesni(key, round_keys);
+        return;
+    }
+#else
+    (void)backend;
+#endif
+
+    key_expansion(key, round_keys);
+}
+
+static void aes_encrypt_block(aes_backend_t backend,
+                              const uint8_t round_keys[AES128_ROUND_KEY_SIZE],
+                              const uint8_t input[AES_BLOCK_SIZE],
+                              uint8_t output[AES_BLOCK_SIZE]) {
+    if (backend == AES_BACKEND_AESNI) {
+#if defined(AES_HAS_X86_BACKEND)
+        aes_encrypt_block_aesni(round_keys, input, output);
+        return;
+#endif
+    }
+
+    if (backend == AES_BACKEND_NEON) {
+#if defined(AES_HAS_ARM_BACKEND)
+        aes_encrypt_block_neon(round_keys, input, output);
+        return;
+#endif
+    }
+
+    aes_encrypt_block_portable(round_keys, input, output);
+}
+
 static void increment_counter(uint8_t counter[AES_BLOCK_SIZE]) {
     size_t i = AES_BLOCK_SIZE;
     while (i-- > 0u) {
@@ -179,6 +435,7 @@ static void aes_crypt_ctr(const uint8_t *key,
                           const uint8_t *input,
                           uint8_t *output,
                           size_t msg_len) {
+    const aes_backend_t backend = get_backend();
     uint8_t round_keys[AES128_ROUND_KEY_SIZE];
     uint8_t counter[AES_BLOCK_SIZE];
     uint8_t keystream[AES_BLOCK_SIZE];
@@ -192,7 +449,7 @@ static void aes_crypt_ctr(const uint8_t *key,
         return;
     }
 
-    key_expansion(key, round_keys);
+    init_round_keys(backend, key, round_keys);
     memcpy(counter, iv, AES_BLOCK_SIZE);
 
     while (offset < msg_len) {
@@ -203,7 +460,7 @@ static void aes_crypt_ctr(const uint8_t *key,
             block_len = AES_BLOCK_SIZE;
         }
 
-        aes_encrypt_block(round_keys, counter, keystream);
+        aes_encrypt_block(backend, round_keys, counter, keystream);
 
         for (i = 0u; i < block_len; ++i) {
             output[offset + i] = (uint8_t)(input[offset + i] ^ keystream[i]);

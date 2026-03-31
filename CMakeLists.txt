@@ -15,6 +15,15 @@ else()
   target_compile_options(aes PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+set(AES_RUNTIME_BACKENDS "portable")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64|i[3-6]86)$")
+  set(AES_RUNTIME_BACKENDS "portable + aesni(runtime)")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+  set(AES_RUNTIME_BACKENDS "portable + neon/runtime-crypto")
+endif()
+
+message(STATUS "AES runtime backends compiled: ${AES_RUNTIME_BACKENDS}")
+
 add_executable(aes_ctr_test main.c)
 target_link_libraries(aes_ctr_test PRIVATE aes)
 

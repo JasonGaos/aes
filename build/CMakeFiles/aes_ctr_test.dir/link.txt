@@ -1,1 +1,0 @@
-/usr/bin/cc  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/aes_ctr_test.dir/main.c.o -o aes_ctr_test  libaes.a
