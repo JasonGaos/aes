@@ -2,12 +2,22 @@
 
 #include <string.h>
 
+#if defined(__AICPU_DEVICE__)
+#define AES_FORCE_PORTABLE_BACKEND 1
+#endif
+
+#if !defined(AES_FORCE_PORTABLE_BACKEND)
 #if defined(__x86_64__) || defined(__x86_64) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #define AES_HAS_X86_BACKEND 1
 #endif
 
 #if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
 #define AES_HAS_ARM_BACKEND 1
+#endif
+#endif
+
+#if defined(AES_HAS_ARM_BACKEND) && (defined(__ARM_FEATURE_AES) || defined(__ARM_FEATURE_CRYPTO))
+#define AES_HAS_ARM_CRYPTO_BACKEND 1
 #endif
 
 #if defined(AES_HAS_X86_BACKEND)
@@ -43,7 +53,7 @@
 #define AES_TARGET_AESNI
 #endif
 
-#if defined(AES_HAS_ARM_BACKEND) && (defined(__GNUC__) || defined(__clang__))
+#if defined(AES_HAS_ARM_CRYPTO_BACKEND) && (defined(__GNUC__) || defined(__clang__))
 #define AES_TARGET_ARM_CRYPTO __attribute__((target("+crypto")))
 #else
 #define AES_TARGET_ARM_CRYPTO
@@ -241,7 +251,7 @@ static int runtime_has_aesni(void) {
 }
 
 static int runtime_has_arm_crypto(void) {
-#if defined(AES_HAS_ARM_BACKEND)
+#if defined(AES_HAS_ARM_CRYPTO_BACKEND)
 #if defined(__APPLE__)
     return 1;
 #elif defined(__linux__)
@@ -364,7 +374,7 @@ static void aes_encrypt_block_aesni(const uint8_t round_keys[AES128_ROUND_KEY_SI
 }
 #endif
 
-#if defined(AES_HAS_ARM_BACKEND)
+#if defined(AES_HAS_ARM_CRYPTO_BACKEND)
 AES_TARGET_ARM_CRYPTO
 static void aes_encrypt_block_neon(const uint8_t round_keys[AES128_ROUND_KEY_SIZE],
                                    const uint8_t input[AES_BLOCK_SIZE],

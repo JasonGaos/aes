@@ -69,6 +69,8 @@ ctest --test-dir build --output-on-failure
 - a NIST AES-128-CTR known-answer test vector
 - a partial-block round-trip test
 
+It also runs a simple throughput benchmark for encryption and decryption on a 64 KB message and reports the result in GB/s.
+
 ## Reference
 
 The AES block core was adapted from:

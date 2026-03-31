@@ -1,7 +1,14 @@
 #include "aes.h"
 
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+
+#define BENCHMARK_MSG_LEN (64u * 1024u)
+#define BENCHMARK_MIN_SECONDS 0.20
+
+static volatile uint8_t benchmark_sink = 0u;
 
 static void print_hex(const uint8_t *buffer, size_t length) {
     size_t i;
@@ -26,6 +33,108 @@ static int expect_bytes(const char *label,
     printf("  actual:   ");
     print_hex(actual, length);
     return 0;
+}
+
+static double now_seconds(void) {
+    struct timespec ts;
+    (void)timespec_get(&ts, TIME_UTC);
+    return (double)ts.tv_sec + ((double)ts.tv_nsec / 1000000000.0);
+}
+
+static double benchmark_encrypt_gbps(const uint8_t *key,
+                                     const uint8_t *iv,
+                                     const uint8_t *plaintext,
+                                     uint8_t *ciphertext,
+                                     size_t msg_len) {
+    size_t iterations = 1u;
+    double elapsed = 0.0;
+
+    do {
+        size_t i;
+        const double start = now_seconds();
+
+        for (i = 0u; i < iterations; ++i) {
+            aes_encrypt_msg(key, iv, plaintext, ciphertext, msg_len);
+            benchmark_sink ^= ciphertext[i % msg_len];
+        }
+
+        elapsed = now_seconds() - start;
+
+        if (elapsed < BENCHMARK_MIN_SECONDS) {
+            iterations *= 2u;
+        }
+    } while (elapsed < BENCHMARK_MIN_SECONDS && iterations <= (1u << 22));
+
+    return ((double)msg_len * (double)iterations) / elapsed / 1000000000.0;
+}
+
+static double benchmark_decrypt_gbps(const uint8_t *key,
+                                     const uint8_t *iv,
+                                     const uint8_t *ciphertext,
+                                     uint8_t *plaintext,
+                                     size_t msg_len) {
+    size_t iterations = 1u;
+    double elapsed = 0.0;
+
+    do {
+        size_t i;
+        const double start = now_seconds();
+
+        for (i = 0u; i < iterations; ++i) {
+            aes_decrypt_msg(key, iv, ciphertext, plaintext, msg_len);
+            benchmark_sink ^= plaintext[i % msg_len];
+        }
+
+        elapsed = now_seconds() - start;
+
+        if (elapsed < BENCHMARK_MIN_SECONDS) {
+            iterations *= 2u;
+        }
+    } while (elapsed < BENCHMARK_MIN_SECONDS && iterations <= (1u << 22));
+
+    return ((double)msg_len * (double)iterations) / elapsed / 1000000000.0;
+}
+
+static int run_throughput_benchmark(void) {
+    const uint8_t key[AES_KEY_SIZE] = {
+        0x60, 0x3d, 0xeb, 0x10, 0x15, 0xca, 0x71, 0xbe,
+        0x2b, 0x73, 0xae, 0xf0, 0x85, 0x7d, 0x77, 0x81
+    };
+    const uint8_t iv[AES_IV_SIZE] = {
+        0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+        0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff
+    };
+    uint8_t *plaintext = (uint8_t *)malloc(BENCHMARK_MSG_LEN);
+    uint8_t *ciphertext = (uint8_t *)malloc(BENCHMARK_MSG_LEN);
+    uint8_t *recovered = (uint8_t *)malloc(BENCHMARK_MSG_LEN);
+    size_t i;
+    double encrypt_gbps;
+    double decrypt_gbps;
+
+    if (plaintext == NULL || ciphertext == NULL || recovered == NULL) {
+        printf("[FAIL] Throughput benchmark allocation\n");
+        free(plaintext);
+        free(ciphertext);
+        free(recovered);
+        return 0;
+    }
+
+    for (i = 0u; i < BENCHMARK_MSG_LEN; ++i) {
+        plaintext[i] = (uint8_t)(i & 0xffu);
+    }
+
+    aes_encrypt_msg(key, iv, plaintext, ciphertext, BENCHMARK_MSG_LEN);
+
+    encrypt_gbps = benchmark_encrypt_gbps(key, iv, plaintext, ciphertext, BENCHMARK_MSG_LEN);
+    decrypt_gbps = benchmark_decrypt_gbps(key, iv, ciphertext, recovered, BENCHMARK_MSG_LEN);
+
+    printf("Encrypt throughput (64 KB): %.3f GB/s\n", encrypt_gbps);
+    printf("Decrypt throughput (64 KB): %.3f GB/s\n", decrypt_gbps);
+
+    free(plaintext);
+    free(ciphertext);
+    free(recovered);
+    return 1;
 }
 
 int main(void) {
@@ -96,5 +205,10 @@ int main(void) {
     }
 
     printf("All AES-CTR tests passed.\n");
+    ok &= run_throughput_benchmark();
+    if (!ok) {
+        return 1;
+    }
+
     return 0;
 }
